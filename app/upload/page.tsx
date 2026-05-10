@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
@@ -148,16 +150,28 @@ export default function UploadPage() {
         )}
 
         {/* Lernzettel-Anzeige */}
-        {lernzettel && (
-          <div className="mt-6 bg-white rounded-xl shadow-md p-8">
-            <h2 className="text-xl font-semibold text-slate-800 mb-4">
-              ✅ Dein Lernzettel
-            </h2>
-            <div className="prose prose-slate max-w-none whitespace-pre-wrap font-sans text-slate-700">
-              {lernzettel}
-            </div>
-          </div>
-        )}
+{lernzettel && (
+  <div className="mt-6 bg-white rounded-xl shadow-md p-8">
+    <div className="flex items-center justify-between mb-4">
+  <h2 className="text-xl font-semibold text-slate-800">
+    ✅ Dein Lernzettel
+  </h2>
+  <button
+    onClick={() => {
+      navigator.clipboard.writeText(lernzettel);
+    }}
+    className="text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded-lg transition"
+  >
+    📋 Kopieren
+  </button>
+</div>
+    <article className="prose prose-slate prose-headings:text-slate-800 prose-strong:text-slate-900 max-w-none">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+        {lernzettel}
+      </ReactMarkdown>
+    </article>
+  </div>
+)}
       </div>
     </main>
   );
