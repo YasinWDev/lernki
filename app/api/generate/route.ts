@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { NextResponse } from "next/server";
 import type { LernzettelErgebnis } from "@/types/lernzettel";
+import { createClient } from "@/lib/supabase/server"; // 👈 NEU
 
 export async function POST(request: Request) {
   try {
@@ -9,9 +10,8 @@ export async function POST(request: Request) {
     const file = formData.get("file") as File | null;
     const anzahlFragenRaw = formData.get("anzahlFragen");
     const schwierigkeitRaw = formData.get("schwierigkeit");
-    const anzahlKartenRaw = formData.get("anzahlKarten"); // 👈 NEU (optional)
+    const anzahlKartenRaw = formData.get("anzahlKarten");
 
-    // 🔍 DEBUG 1
     console.log("🔍 RAW FormData:", {
       fileName: file?.name,
       anzahlFragenRaw,
@@ -31,8 +31,6 @@ export async function POST(request: Request) {
       Math.max(Number(anzahlFragenRaw) || 5, 1),
       20
     );
-
-    // Karteikarten: Default 10, Range 5–25
     const anzahlKarten = Math.min(
       Math.max(Number(anzahlKartenRaw) || 10, 5),
       25
@@ -50,7 +48,6 @@ export async function POST(request: Request) {
     const schwierigkeit =
       schwierigkeitsMap[schwierigkeitRaw as string] ?? "mittel";
 
-    // 🔍 DEBUG 2
     console.log("📥 Generierung startet mit:", {
       anzahlFragen,
       anzahlKarten,
@@ -76,7 +73,7 @@ export async function POST(request: Request) {
         "SCHWER – Anwendungs- und Transferfragen. Kombiniere mehrere Konzepte. Ablenker sollen inhaltlich sehr ähnlich zur richtigen Antwort sein.",
     }[schwierigkeit];
 
-    // 6. Prompt
+    // 6. Prompt (unverändert)
     const prompt = `Du bist ein erfahrener Lerncoach. Analysiere das beigefügte PDF-Dokument und erstelle auf Deutsch:
 
 1. Einen strukturierten Lernzettel (als Markdown)
@@ -120,11 +117,7 @@ Für die KARTEIKARTEN:
   - "vorderseite": Ein Begriff, eine Frage ODER ein Kernkonzept (kurz, max. 10 Wörter, prägnant)
   - "rueckseite": Die Definition, Antwort oder Erklärung (1-3 Sätze, verständlich formuliert)
   - "kategorie": Eines von "begriff" | "konzept" | "frage" | "fakt"
-- Mische die Kategorien für Abwechslung:
-  - "begriff" für Fachwörter + Definition
-  - "konzept" für größere Ideen/Theorien/Zusammenhänge
-  - "frage" für prüfungsartige W-Fragen
-  - "fakt" für Zahlen, Daten, Jahreszahlen, konkrete Fakten
+- Mische die Kategorien für Abwechslung
 - Karten sollen eigenständig lernbar sein (genug Kontext auf der Rückseite)
 - Fokus auf das, was man sich MERKEN muss
 
@@ -134,7 +127,7 @@ WICHTIG:
 - Das Array "quiz" muss EXAKT ${anzahlFragen} Einträge enthalten.
 - Das Array "karteikarten" muss EXAKT ${anzahlKarten} Einträge enthalten.`;
 
-    // 7. Schema mit min/maxItems
+    // 7. Schema
     const responseSchema = {
       type: Type.OBJECT,
       properties: {
@@ -211,13 +204,12 @@ WICHTIG:
 
     const ergebnis: LernzettelErgebnis = JSON.parse(rawText);
 
-    // 9. IDs für Karteikarten ergänzen (Gemini liefert keine IDs)
+    // 9. IDs für Karteikarten ergänzen
     ergebnis.karteikarten = ergebnis.karteikarten.map((k, i) => ({
       ...k,
       id: `card-${Date.now()}-${i}`,
     }));
 
-    // 🔍 DEBUG 3
     console.log("✅ Gemini Antwort:", {
       titel: ergebnis.titel,
       anzahlErhaltenerFragen: ergebnis.quiz.length,
@@ -226,10 +218,50 @@ WICHTIG:
       erwarteteKarten: anzahlKarten,
     });
 
+    // ============================================
+    // 10. 💾 NEU: Speichern wenn User eingeloggt
+    // ============================================
+    let savedId: string | null = null;
+
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (user) {
+      console.log("👤 User eingeloggt, speichere in DB:", user.id);
+
+      const { data: saved, error: saveError } = await supabase
+        .from("lernzettel")
+        .insert({
+          user_id: user.id,
+          titel: ergebnis.titel,
+          inhalt: ergebnis.lernzettel,
+          quiz: ergebnis.quiz,
+          karteikarten: ergebnis.karteikarten,
+          file_name: file.name,
+          schwierigkeit: schwierigkeit,
+        })
+        .select("id")
+        .single();
+
+      if (saveError) {
+        console.error("⚠️ DB-Save-Fehler (nicht kritisch):", saveError);
+        // User bekommt trotzdem sein Ergebnis, nur halt ohne Speicherung
+      } else {
+        savedId = saved.id;
+        console.log("✅ In DB gespeichert:", savedId);
+      }
+    } else {
+      console.log("👻 User nicht eingeloggt, kein DB-Save");
+    }
+
+    // 11. Rückgabe (jetzt mit optionaler id)
     return NextResponse.json({
       success: true,
       ergebnis: ergebnis,
       fileName: file.name,
+      id: savedId, // 👈 NEU: null wenn Gast, UUID wenn eingeloggt
     });
   } catch (error) {
     console.error("Generate error:", error);

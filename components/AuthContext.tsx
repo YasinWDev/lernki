@@ -7,6 +7,8 @@ import {
   useState,
   ReactNode,
 } from "react";
+import type { User as SupabaseUser } from "@supabase/supabase-js";
+import { createClient } from "@/lib/supabase/client";
 
 export type User = {
   id: string;
@@ -24,48 +26,72 @@ type AuthContextType = {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Supabase User → dein User-Format
+function mapUser(supaUser: SupabaseUser | null): User | null {
+  if (!supaUser) return null;
+  return {
+    id: supaUser.id,
+    email: supaUser.email ?? "",
+    name: (supaUser.user_metadata?.name as string | undefined) ?? undefined,
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const supabase = createClient();
 
   useEffect(() => {
-    fetch("/api/auth/me")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => setUser(data?.user ?? null))
-      .catch(() => setUser(null))
-      .finally(() => setLoading(false));
+    // Beim Mount: aktuellen User holen
+    supabase.auth.getUser().then(({ data }) => {
+      setUser(mapUser(data.user));
+      setLoading(false);
+    });
+
+    // Auf Auth-Änderungen lauschen (Login/Logout/Token-Refresh in anderen Tabs etc.)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setUser(mapUser(session?.user ?? null));
+      }
+    );
+
+    return () => subscription.unsubscribe();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const login = async (email: string, password: string) => {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.message ?? "Login fehlgeschlagen");
-    }
-    const data = await res.json();
-    setUser(data.user);
+    if (error) throw new Error(translateError(error.message));
+    setUser(mapUser(data.user));
   };
 
   const register = async (email: string, password: string, name?: string) => {
-    const res = await fetch("/api/auth/register", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, name }),
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { name: name || null },
+        emailRedirectTo: `${location.origin}/auth/callback`,
+      },
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.message ?? "Registrierung fehlgeschlagen");
+    if (error) throw new Error(translateError(error.message));
+
+    // Wenn E-Mail-Bestätigung aktiv ist, ist user noch nicht eingeloggt
+    if (data.user && data.session) {
+      setUser(mapUser(data.user));
+    } else {
+      // User muss erst E-Mail bestätigen
+      throw new Error(
+        "Bitte bestätige deine E-Mail-Adresse. Wir haben dir einen Link geschickt."
+      );
     }
-    const data = await res.json();
-    setUser(data.user);
   };
 
   const logout = async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await supabase.auth.signOut();
     setUser(null);
   };
 
@@ -80,4 +106,19 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth muss innerhalb von AuthProvider verwendet werden");
   return ctx;
+}
+
+// Englische Supabase-Fehler → Deutsch
+function translateError(msg: string): string {
+  const map: Record<string, string> = {
+    "Invalid login credentials": "E-Mail oder Passwort ist falsch.",
+    "User already registered": "Diese E-Mail ist bereits registriert.",
+    "Email not confirmed": "Bitte bestätige zuerst deine E-Mail.",
+    "Password should be at least 6 characters":
+      "Das Passwort muss mindestens 6 Zeichen lang sein.",
+    "Unable to validate email address: invalid format":
+      "Ungültige E-Mail-Adresse.",
+    "Signup requires a valid password": "Bitte gib ein gültiges Passwort ein.",
+  };
+  return map[msg] || msg;
 }
